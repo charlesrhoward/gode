@@ -1,6 +1,7 @@
 BINARY = gode
 BUILD_DIR = bin
-GO = /opt/homebrew/bin/go
+GO ?= go
+PREFIX ?= $(HOME)/.local/bin
 
 .PHONY: build run test clean install
 
@@ -11,8 +12,8 @@ run: build
 	./$(BUILD_DIR)/$(BINARY)
 
 install:
-	mkdir -p /Users/tradecraft/.local/bin
-	$(GO) build -o /Users/tradecraft/.local/bin/$(BINARY) ./cmd/gode
+	mkdir -p $(PREFIX)
+	$(GO) build -o $(PREFIX)/$(BINARY) ./cmd/gode
 
 test:
 	$(GO) test ./internal/... -v

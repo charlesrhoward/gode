@@ -59,10 +59,6 @@ var (
 				BorderForeground(colorBorder).
 				Padding(0, 1)
 
-	inputPromptStyle = lipgloss.NewStyle().
-				Foreground(colorPrimary).
-				Bold(true)
-
 	inputLabelStyle = lipgloss.NewStyle().
 			Foreground(colorPrimary).
 			Bold(true)

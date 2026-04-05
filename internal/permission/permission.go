@@ -63,11 +63,11 @@ func (m *Manager) SetAskFunc(fn AskFunc) {
 
 func (m *Manager) Check(toolName, detail string, level Level) (Action, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	// Check session-scoped rules first
 	for _, r := range m.sessionRules {
 		if m.matches(r, toolName, detail) {
+			m.mu.Unlock()
 			return r.Action, nil
 		}
 	}
@@ -75,18 +75,24 @@ func (m *Manager) Check(toolName, detail string, level Level) (Action, error) {
 	// Check configured rules
 	for _, r := range m.rules {
 		if m.matches(r, toolName, detail) {
+			m.mu.Unlock()
 			return r.Action, nil
 		}
 	}
 
 	// Read-only tools always allowed
 	if level == ReadOnly {
+		m.mu.Unlock()
 		return Allow, nil
 	}
 
-	// Ask user
-	if m.askFn != nil {
-		return m.askFn(toolName, detail)
+	// Grab askFn before unlocking — it may block on user input,
+	// so we must not hold the mutex during the call.
+	askFn := m.askFn
+	m.mu.Unlock()
+
+	if askFn != nil {
+		return askFn(toolName, detail)
 	}
 
 	return Deny, nil

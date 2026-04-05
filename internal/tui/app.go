@@ -189,9 +189,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.input.SetWidth(maxInt(msg.Width-6, 20))
+		m.input.SetWidth(max(msg.Width-6, 20))
 		// Recreate markdown renderer with new width
-		if r, err := newMarkdownRenderer(maxInt(msg.Width-6, 20)); err == nil {
+		if r, err := newMarkdownRenderer(max(msg.Width-6, 20)); err == nil {
 			m.mdRender = r
 		}
 		m.recalcViewport()
@@ -380,7 +380,7 @@ func (m *model) resizeInput() {
 func (m *model) recalcViewport() {
 	headerH := 2
 	inputH := m.inputAreaHeight()
-	m.viewport.Width = maxInt(m.width-2, 1)
+	m.viewport.Width = max(m.width-2, 1)
 	vpHeight := m.height - headerH - inputH
 	if vpHeight < 1 {
 		vpHeight = 1
@@ -395,7 +395,7 @@ func (m *model) inputAreaHeight() int {
 	case stateStreaming:
 		return 2
 	default:
-		panelWidth := maxInt(m.width-2, 24)
+		panelWidth := max(m.width-2, 24)
 		panel := inputBorderStyle.Width(panelWidth).Render(m.input.View())
 		hints := mutedStyle.Render("Enter send · Alt+Enter newline · Esc cancel run · /help commands")
 		return lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, inputLabelStyle.Render("Prompt"), panel, hints))
@@ -738,7 +738,7 @@ func (m *model) renderHeader() string {
 	title := headerStyle.Render(fmt.Sprintf("gode v%s", m.version))
 	sessionLabel := sessionStyle.Render(m.sessionLabel())
 	runtimeLabel := mutedStyle.Render(fmt.Sprintf("%s · %s", m.provider, m.modelName))
-	dirLabel := mutedStyle.Render(shortenMiddle(m.session.Directory, maxInt(m.width/2, 24)))
+	dirLabel := mutedStyle.Render(shortenMiddle(m.session.Directory, max(m.width/2, 24)))
 
 	rightTop := mutedStyle.Render(m.stateLabel())
 	if m.totalUsage.Usage.InputTokens > 0 {
@@ -757,14 +757,15 @@ func (m *model) renderInput() string {
 	}
 
 	if m.state == stateStreaming {
+		label := fmt.Sprintf(" running %s...", m.provider)
 		return lipgloss.JoinVertical(
 			lipgloss.Left,
-			m.spinner.View()+mutedStyle.Render(" running local model..."),
+			m.spinner.View()+mutedStyle.Render(label),
 			mutedStyle.Render("Esc cancels the current run"),
 		)
 	}
 
-	panelWidth := maxInt(m.width-2, 24)
+	panelWidth := max(m.width-2, 24)
 	panel := inputBorderStyle.Width(panelWidth).Render(m.input.View())
 	hints := mutedStyle.Render("Enter send · Alt+Enter newline · Esc cancel run · /help commands")
 	return lipgloss.JoinVertical(lipgloss.Left, inputLabelStyle.Render("Prompt"), panel, hints)
@@ -854,7 +855,7 @@ func (m *model) renderEmptyState() string {
 	b.WriteString("  - Alt+Enter newline\n")
 	b.WriteString("  - Esc cancel run\n")
 	b.WriteString("  - /help command list")
-	return emptyStateStyle.Width(maxInt(m.width-4, 36)).Render(b.String())
+	return emptyStateStyle.Width(max(m.width-4, 36)).Render(b.String())
 }
 
 func newMarkdownRenderer(width int) (*glamour.TermRenderer, error) {
@@ -882,9 +883,9 @@ func (m *model) wrapPlainText(content string) string {
 
 func (m *model) transcriptWidth() int {
 	if m.viewport.Width > 0 {
-		return maxInt(m.viewport.Width, 20)
+		return max(m.viewport.Width, 20)
 	}
-	return maxInt(m.width-2, 20)
+	return max(m.width-2, 20)
 }
 
 func (m *model) renderToolCard(tv *toolView) string {
@@ -990,13 +991,6 @@ func shortenMiddle(s string, max int) string {
 	head := (max - 1) / 2
 	tail := max - head - 1
 	return s[:head] + "…" + s[len(s)-tail:]
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 func yesNo(v bool) string {

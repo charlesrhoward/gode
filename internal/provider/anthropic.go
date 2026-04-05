@@ -168,6 +168,7 @@ func (a *Anthropic) processStream(body io.Reader, ch chan<- StreamEvent) {
 	var currentToolID string
 	var currentToolName string
 	var toolInputBuf strings.Builder
+	var inputTokens int
 
 	for sse := range ParseSSE(body) {
 		switch sse.Event {
@@ -238,9 +239,11 @@ func (a *Anthropic) processStream(body io.Reader, ch chan<- StreamEvent) {
 			if err := json.Unmarshal([]byte(sse.Data), &delta); err != nil {
 				continue
 			}
+			usage := delta.Usage
+			usage.InputTokens += inputTokens
 			ch <- EventMessageComplete{
 				StopReason: delta.Delta.StopReason,
-				Usage:      delta.Usage,
+				Usage:      usage,
 			}
 
 		case "message_start":
@@ -249,7 +252,9 @@ func (a *Anthropic) processStream(body io.Reader, ch chan<- StreamEvent) {
 					Usage Usage `json:"usage"`
 				} `json:"message"`
 			}
-			json.Unmarshal([]byte(sse.Data), &msg)
+			if err := json.Unmarshal([]byte(sse.Data), &msg); err == nil {
+				inputTokens = msg.Message.Usage.InputTokens
+			}
 
 		case "error":
 			ch <- EventError{Err: fmt.Errorf("stream error: %s", sse.Data)}

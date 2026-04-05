@@ -12,6 +12,41 @@ import (
 	"github.com/tradecraft/gode/internal/permission"
 )
 
+// matchGlob extends filepath.Match with support for "**" recursive directory matching.
+func matchGlob(pattern, path string) bool {
+	if !strings.Contains(pattern, "**") {
+		matched, _ := filepath.Match(pattern, path)
+		return matched
+	}
+
+	// Split pattern on "**" and match each segment
+	parts := strings.SplitN(pattern, "**", 2)
+	prefix := strings.TrimSuffix(parts[0], string(filepath.Separator))
+	suffix := strings.TrimPrefix(parts[1], string(filepath.Separator))
+
+	// "**/*.go" — prefix is empty, suffix is "*.go"
+	// Match suffix against the filename
+	if prefix == "" && !strings.Contains(suffix, "**") {
+		matched, _ := filepath.Match(suffix, filepath.Base(path))
+		return matched
+	}
+
+	// "src/**/*.go" — prefix is "src", suffix is "*.go"
+	if prefix != "" {
+		rel := path
+		if !strings.HasPrefix(rel, prefix+string(filepath.Separator)) && rel != prefix {
+			return false
+		}
+		// Strip the prefix and recurse
+		remaining := strings.TrimPrefix(rel, prefix+string(filepath.Separator))
+		return matchGlob("**"+string(filepath.Separator)+suffix, remaining)
+	}
+
+	// Fallback: try filepath.Match
+	matched, _ := filepath.Match(pattern, path)
+	return matched
+}
+
 type GlobTool struct{}
 
 type globInput struct {
@@ -85,11 +120,11 @@ func (t *GlobTool) Execute(ctx context.Context, input json.RawMessage) (*Result,
 			return nil
 		}
 
-		matched, _ := filepath.Match(args.Pattern, info.Name())
+		rel, _ := filepath.Rel(root, path)
+		matched := matchGlob(args.Pattern, rel)
 		if !matched {
-			// Try matching full relative path for ** patterns
-			rel, _ := filepath.Rel(root, path)
-			matched, _ = filepath.Match(args.Pattern, rel)
+			// Also try matching just the filename for simple patterns
+			matched, _ = filepath.Match(args.Pattern, info.Name())
 		}
 
 		if matched {
