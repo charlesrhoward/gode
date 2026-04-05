@@ -130,6 +130,23 @@ func (s *SQLiteStore) UpdateSessionMemory(id, memory string) error {
 	return err
 }
 
+func (s *SQLiteStore) DeleteSession(id string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("DELETE FROM messages WHERE session_id = ?", id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec("DELETE FROM sessions WHERE id = ?", id); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
 func (s *SQLiteStore) ListSessions() ([]*SessionRow, error) {
 	rows, err := s.db.Query("SELECT id, title, memory, directory, created_at, updated_at FROM sessions ORDER BY updated_at DESC LIMIT 50")
 	if err != nil {

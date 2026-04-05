@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/muesli/reflow/wrap"
 	"github.com/tradecraft/gode/internal/agent"
 	"github.com/tradecraft/gode/internal/permission"
+	"github.com/tradecraft/gode/internal/provider"
 	"github.com/tradecraft/gode/internal/session"
 )
 
@@ -33,6 +35,10 @@ type agentEventMsg struct{ event agent.Event }
 type compactionDoneMsg struct {
 	result *agent.EventCompacted
 	err    error
+}
+type bangResultMsg struct {
+	cmd    string
+	output string
 }
 
 // App is the main TUI application.
@@ -116,7 +122,10 @@ type model struct {
 	width  int
 	height int
 
-	totalUsage agent.EventTurnDone
+	totalUsage     agent.EventTurnDone
+	cumulativeUsage provider.Usage
+	lastTurnDuration time.Duration
+	streamStart    time.Time
 }
 
 type messageView struct {
@@ -128,6 +137,7 @@ type messageView struct {
 type toolView struct {
 	id     string
 	name   string
+	detail string // command, file path, etc.
 	status string // "running", "done", "error"
 	output string
 }
@@ -200,6 +210,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case agentEventMsg:
 		return m.handleAgentEvent(msg.event)
+
+	case bangResultMsg:
+		m.messages = append(m.messages, messageView{
+			role:    "system",
+			content: fmt.Sprintf("$ %s\n%s", msg.cmd, msg.output),
+		})
+		m.viewport.SetContent(m.renderMessages())
+		m.viewport.GotoBottom()
+		return m, nil
 
 	case compactionDoneMsg:
 		m.state = stateReady
@@ -318,6 +337,9 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if strings.HasPrefix(text, "/") {
 				return m.handleCommand(text)
 			}
+			if strings.HasPrefix(text, "!") {
+				return m.handleBang(text)
+			}
 			return m.submitMessage(text)
 		}
 
@@ -397,7 +419,7 @@ func (m *model) inputAreaHeight() int {
 	default:
 		panelWidth := max(m.width-2, 24)
 		panel := inputBorderStyle.Width(panelWidth).Render(m.input.View())
-		hints := mutedStyle.Render("Enter send · Alt+Enter newline · Esc cancel run · /help commands")
+		hints := mutedStyle.Render("Enter send · Alt+Enter newline · ! shell · /help commands")
 		return lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, inputLabelStyle.Render("Prompt"), panel, hints))
 	}
 }
@@ -411,6 +433,7 @@ func (m *model) submitMessage(text string) (tea.Model, tea.Cmd) {
 	m.input.Reset()
 	m.input.SetHeight(1)
 	m.state = stateStreaming
+	m.streamStart = time.Now()
 	m.streamingBuf.Reset()
 	m.toolViews = make(map[string]*toolView)
 	m.recalcViewport()
@@ -441,6 +464,29 @@ func (m *model) submitMessage(text string) (tea.Model, tea.Cmd) {
 	)
 }
 
+func (m *model) handleBang(text string) (tea.Model, tea.Cmd) {
+	m.input.Reset()
+	m.input.SetHeight(1)
+	m.recalcViewport()
+
+	cmd := strings.TrimSpace(text[1:])
+	if cmd == "" {
+		return m.showSystemMsg("usage: ! <command>")
+	}
+
+	return m, func() tea.Msg {
+		out, err := exec.Command("bash", "-c", cmd).CombinedOutput()
+		result := strings.TrimRight(string(out), "\n")
+		if err != nil {
+			if result != "" {
+				result += "\n"
+			}
+			result += "exit: " + err.Error()
+		}
+		return bangResultMsg{cmd: cmd, output: result}
+	}
+}
+
 func (m *model) handleCommand(cmd string) (tea.Model, tea.Cmd) {
 	m.input.Reset()
 	m.input.SetHeight(1)
@@ -459,19 +505,25 @@ func (m *model) handleCommand(cmd string) (tea.Model, tea.Cmd) {
 		help := `Commands:
   /help                show commands and shortcuts
   /status              show provider, model, and session details
-  /compact             compact old transcript history into session memory
+  /model <name>        switch to a different model
+  /compact             compact old transcript into session memory
   /clear               clear the current transcript view
   /new                 start a fresh session in this directory
   /sessions            list recent sessions
   /switch <id>         switch to a session by ID prefix
   /rename <name>       rename the current session
+  /delete <id>         delete a session by ID prefix
   /quit, /q            exit
+
+Shell:
+  ! <command>          run a shell command directly (e.g. ! git status)
 
 Shortcuts:
   Enter                send prompt
   Alt+Enter            insert newline
   Esc                  cancel current run
   j/k or arrows        scroll history
+  g/G                  jump to top/bottom
   Ctrl+U / Ctrl+D      half-page scroll`
 		m.messages = append(m.messages, messageView{role: "system", content: help})
 		m.viewport.SetContent(m.renderMessages())
@@ -488,6 +540,13 @@ Shortcuts:
 			m.agent.EstimatedTokens(),
 			yesNo(strings.TrimSpace(m.session.Memory) != ""),
 		))
+		if m.cumulativeUsage.InputTokens > 0 {
+			sb.WriteString(fmt.Sprintf("\n\ntokens this session: %d in, %d out",
+				m.cumulativeUsage.InputTokens, m.cumulativeUsage.OutputTokens))
+		}
+		if m.lastTurnDuration > 0 {
+			sb.WriteString(fmt.Sprintf("\nlast turn: %s", m.lastTurnDuration.Round(100*time.Millisecond)))
+		}
 		if len(m.runtime) > 0 {
 			sb.WriteString("\n\nruntime:\n")
 			for _, line := range m.runtime {
@@ -576,6 +635,46 @@ Shortcuts:
 		m.session.Title = name
 		return m.showSystemMsg(fmt.Sprintf("session renamed to '%s'", name))
 
+	case parts[0] == "/model":
+		if len(parts) < 2 {
+			return m.showSystemMsg(fmt.Sprintf("current model: %s\nusage: /model <model-name>", m.modelName))
+		}
+		newModel := strings.Join(parts[1:], " ")
+		m.modelName = newModel
+		m.agent.SetModel(newModel)
+		return m.showSystemMsg(fmt.Sprintf("model switched to %s", newModel))
+
+	case parts[0] == "/delete":
+		if len(parts) < 2 {
+			return m.showSystemMsg("usage: /delete <session-id>")
+		}
+		prefix := parts[1]
+		sessions, err := m.agent.ListSessions()
+		if err != nil {
+			return m.showSystemMsg(fmt.Sprintf("error: %v", err))
+		}
+		var matchID, matchTitle string
+		for _, s := range sessions {
+			if strings.HasPrefix(s.ID, prefix) {
+				matchID = s.ID
+				matchTitle = s.Title
+				if matchTitle == "" {
+					matchTitle = s.Directory
+				}
+				break
+			}
+		}
+		if matchID == "" {
+			return m.showSystemMsg(fmt.Sprintf("no session found matching '%s'", prefix))
+		}
+		if matchID == m.session.ID {
+			return m.showSystemMsg("cannot delete the current session — switch to another first")
+		}
+		if err := m.agent.DeleteSession(matchID); err != nil {
+			return m.showSystemMsg(fmt.Sprintf("error deleting: %v", err))
+		}
+		return m.showSystemMsg(fmt.Sprintf("deleted session '%s' (%s)", matchTitle, matchID[:8]))
+
 	default:
 		m.messages = append(m.messages, messageView{
 			role:    "system",
@@ -606,10 +705,15 @@ func (m *model) handleAgentEvent(evt agent.Event) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case agent.EventToolStart:
-		tv := &toolView{id: e.ID, name: e.Name, status: "running"}
-		m.toolViews[e.ID] = tv
-		if last := m.lastAssistant(); last != nil {
-			last.tools = append(last.tools, tv)
+		if existing, ok := m.toolViews[e.ID]; ok {
+			// Second EventToolStart with detail (from executeTool)
+			existing.detail = e.Detail
+		} else {
+			tv := &toolView{id: e.ID, name: e.Name, detail: e.Detail, status: "running"}
+			m.toolViews[e.ID] = tv
+			if last := m.lastAssistant(); last != nil {
+				last.tools = append(last.tools, tv)
+			}
 		}
 		m.viewport.SetContent(m.renderMessages())
 		m.viewport.GotoBottom()
@@ -631,6 +735,8 @@ func (m *model) handleAgentEvent(evt agent.Event) (tea.Model, tea.Cmd) {
 	case agent.EventTurnDone:
 		m.state = stateReady
 		m.totalUsage = e
+		m.cumulativeUsage = e.TotalUsage
+		m.lastTurnDuration = e.Duration
 		m.streamingBuf.Reset()
 		m.runCancel = nil
 		m.input.Focus()
@@ -741,9 +847,13 @@ func (m *model) renderHeader() string {
 	dirLabel := mutedStyle.Render(shortenMiddle(m.session.Directory, max(m.width/2, 24)))
 
 	rightTop := mutedStyle.Render(m.stateLabel())
-	if m.totalUsage.Usage.InputTokens > 0 {
-		rightTop = mutedStyle.Render(fmt.Sprintf("%s · %d↓ %d↑",
-			m.stateLabel(), m.totalUsage.Usage.InputTokens, m.totalUsage.Usage.OutputTokens))
+	if m.cumulativeUsage.InputTokens > 0 {
+		info := fmt.Sprintf("%s · %d↓ %d↑", m.stateLabel(),
+			m.cumulativeUsage.InputTokens, m.cumulativeUsage.OutputTokens)
+		if m.lastTurnDuration > 0 {
+			info += fmt.Sprintf(" · %s", m.lastTurnDuration.Round(100*time.Millisecond))
+		}
+		rightTop = mutedStyle.Render(info)
 	}
 
 	line1 := justifyLine(m.width, lipgloss.JoinHorizontal(lipgloss.Top, title, " ", sessionLabel), rightTop)
@@ -757,7 +867,8 @@ func (m *model) renderInput() string {
 	}
 
 	if m.state == stateStreaming {
-		label := fmt.Sprintf(" running %s...", m.provider)
+		elapsed := time.Since(m.streamStart).Round(100 * time.Millisecond)
+		label := fmt.Sprintf(" running %s... (%s)", m.provider, elapsed)
 		return lipgloss.JoinVertical(
 			lipgloss.Left,
 			m.spinner.View()+mutedStyle.Render(label),
@@ -767,7 +878,7 @@ func (m *model) renderInput() string {
 
 	panelWidth := max(m.width-2, 24)
 	panel := inputBorderStyle.Width(panelWidth).Render(m.input.View())
-	hints := mutedStyle.Render("Enter send · Alt+Enter newline · Esc cancel run · /help commands")
+	hints := mutedStyle.Render("Enter send · Alt+Enter newline · ! shell · /help commands")
 	return lipgloss.JoinVertical(lipgloss.Left, inputLabelStyle.Render("Prompt"), panel, hints)
 }
 
@@ -905,11 +1016,18 @@ func (m *model) renderToolCard(tv *toolView) string {
 	}
 
 	header := toolNameStyle.Render(tv.name) + " " + statusStyle.Render(statusIcon)
+	if tv.detail != "" {
+		detail := tv.detail
+		if len(detail) > 80 {
+			detail = detail[:77] + "..."
+		}
+		header += " " + mutedStyle.Render(detail)
+	}
 	content := header
 	if tv.output != "" {
 		output := tv.output
-		if len(output) > 200 {
-			output = output[:200] + "..."
+		if len(output) > 300 {
+			output = output[:300] + "..."
 		}
 		content += "\n" + mutedStyle.Render(output)
 	}

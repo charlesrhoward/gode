@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/tradecraft/gode/internal/config"
 	"github.com/tradecraft/gode/internal/permission"
@@ -22,14 +24,16 @@ type Event interface {
 }
 
 type EventText struct{ Text string }
-type EventToolStart struct{ ID, Name string }
+type EventToolStart struct{ ID, Name, Detail string }
 type EventToolEnd struct {
 	ID     string
 	Name   string
 	Result *tool.Result
 }
 type EventTurnDone struct {
-	Usage provider.Usage
+	Usage      provider.Usage
+	TotalUsage provider.Usage
+	Duration   time.Duration
 }
 type EventPermission struct {
 	Tool   string
@@ -66,9 +70,10 @@ type Config struct {
 }
 
 type Agent struct {
-	cfg      Config
-	events   chan Event
-	messages []provider.Message
+	cfg        Config
+	events     chan Event
+	messages   []provider.Message
+	totalUsage provider.Usage
 }
 
 // EventHistory is emitted on startup to replay prior conversation messages to the TUI.
@@ -239,6 +244,8 @@ func (a *Agent) RenameSession(title string) error {
 
 // Run executes a full agent turn with the given user message.
 func (a *Agent) Run(ctx context.Context, userMessage string) {
+	turnStart := time.Now()
+
 	// Add user message
 	userMsg := provider.UserTextMessage(userMessage)
 	a.messages = append(a.messages, userMsg)
@@ -285,7 +292,7 @@ func (a *Agent) Run(ctx context.Context, userMessage string) {
 				a.events <- EventText{Text: e.Text}
 
 			case provider.EventToolUseStart:
-				a.events <- EventToolStart{ID: e.ID, Name: e.Name}
+				a.events <- EventToolStart{ID: e.ID, Name: e.Name, Detail: ""}
 
 			case provider.EventToolUseDelta:
 				// Accumulate (handled by provider)
@@ -312,7 +319,14 @@ func (a *Agent) Run(ctx context.Context, userMessage string) {
 
 		// No tool calls → turn complete
 		if len(toolCalls) == 0 {
-			a.events <- EventTurnDone{Usage: totalUsage}
+			a.totalUsage.InputTokens += totalUsage.InputTokens
+			a.totalUsage.OutputTokens += totalUsage.OutputTokens
+			a.events <- EventTurnDone{
+				Usage:      totalUsage,
+				TotalUsage: a.totalUsage,
+				Duration:   time.Since(turnStart),
+			}
+			a.autoTitle(userMessage)
 			return
 		}
 
@@ -344,8 +358,9 @@ func (a *Agent) executeTool(ctx context.Context, tc toolCall) *tool.Result {
 		return result
 	}
 
-	// Check permission
+	// Emit tool detail (command, file path) for TUI display
 	detail := extractDetail(tc.Name, tc.Input)
+	a.events <- EventToolStart{ID: tc.ID, Name: tc.Name, Detail: detail}
 	action, err := a.cfg.Permissions.Check(tc.Name, detail, t.Permission())
 	if err != nil {
 		result := &tool.Result{Output: fmt.Sprintf("permission error: %v", err), IsError: true}
@@ -367,6 +382,21 @@ func (a *Agent) executeTool(ctx context.Context, tc toolCall) *tool.Result {
 
 	a.events <- EventToolEnd{ID: tc.ID, Name: tc.Name, Result: result}
 	return result
+}
+
+// SetModel changes the model used for future requests.
+func (a *Agent) SetModel(model string) {
+	a.cfg.Model = model
+}
+
+// DeleteSession removes a session and its messages from storage.
+func (a *Agent) DeleteSession(id string) error {
+	return a.cfg.Store.DeleteSession(id)
+}
+
+// TotalUsage returns cumulative token usage across all turns.
+func (a *Agent) TotalUsage() provider.Usage {
+	return a.totalUsage
 }
 
 func (a *Agent) Compact(ctx context.Context) (*EventCompacted, error) {
@@ -395,8 +425,12 @@ You help users with software engineering tasks: writing code, debugging, running
 - Working directory: %s
 - Platform: %s/%s
 - Hostname: %s
-
 `, cwd, runtime.GOOS, runtime.GOARCH, hostname))
+
+	if gc := gitContext(); gc != "" {
+		b.WriteString(gc)
+	}
+	b.WriteByte('\n')
 
 	if strings.TrimSpace(a.cfg.Session.Memory) != "" {
 		b.WriteString("# Compacted Memory\n")
@@ -465,6 +499,43 @@ You help users with software engineering tasks: writing code, debugging, running
 	if instructions != "" {
 		b.WriteString("\n\n# Project Instructions\n\n")
 		b.WriteString(instructions)
+	}
+
+	return b.String()
+}
+
+// autoTitle sets the session title from the first user message if not already titled.
+func (a *Agent) autoTitle(userMessage string) {
+	if strings.TrimSpace(a.cfg.Session.Title) != "" {
+		return
+	}
+	title := strings.ReplaceAll(strings.TrimSpace(userMessage), "\n", " ")
+	if len(title) > 60 {
+		title = title[:57] + "..."
+	}
+	a.cfg.Session.Title = title
+	a.cfg.Store.UpdateSessionTitle(a.cfg.Session.ID, title)
+}
+
+// gitContext returns git branch and status info, or empty string if not in a git repo.
+func gitContext() string {
+	branch, err := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("- Git branch: %s\n", strings.TrimSpace(string(branch))))
+
+	status, err := exec.Command("git", "status", "--porcelain").Output()
+	if err == nil {
+		trimmed := strings.TrimSpace(string(status))
+		if trimmed == "" {
+			b.WriteString("- Git status: clean\n")
+		} else {
+			lines := strings.Split(trimmed, "\n")
+			b.WriteString(fmt.Sprintf("- Git status: %d changed files\n", len(lines)))
+		}
 	}
 
 	return b.String()
