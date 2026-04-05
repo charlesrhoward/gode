@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -60,19 +61,23 @@ func (t *BashTool) Execute(ctx context.Context, input json.RawMessage) (*Result,
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "bash", "-c", args.Command)
+	cmd.Env = os.Environ()
 	output, err := cmd.CombinedOutput()
 
-	result := string(output)
+	result := strings.TrimRight(string(output), "\n")
+	if len(result) > 100000 {
+		result = result[:100000] + "\n... (output truncated at 100K chars)"
+	}
+
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return &Result{Output: fmt.Sprintf("command timed out after %ds\n%s", timeout, result), IsError: true}, nil
 		}
-		return &Result{Output: fmt.Sprintf("%s\nexit code: %v", result, err), IsError: true}, nil
-	}
-
-	result = strings.TrimRight(result, "\n")
-	if len(result) > 100000 {
-		result = result[:100000] + "\n... (output truncated)"
+		// Show the output first, then the exit code on its own line
+		if result != "" {
+			return &Result{Output: fmt.Sprintf("%s\n\nexit status: %v", result, err), IsError: true}, nil
+		}
+		return &Result{Output: fmt.Sprintf("exit status: %v", err), IsError: true}, nil
 	}
 
 	return &Result{Output: result}, nil

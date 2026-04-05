@@ -61,6 +61,12 @@ Run a single prompt without the TUI:
 ./bin/gode -p "Summarize this repository."
 ```
 
+Run a single prompt headless and explicitly allow tool execution:
+
+```bash
+./bin/gode -p "Inspect this repository and fix the failing test." --yes
+```
+
 Print the version:
 
 ```bash

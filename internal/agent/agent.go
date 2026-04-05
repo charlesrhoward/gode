@@ -514,7 +514,9 @@ func (a *Agent) autoTitle(userMessage string) {
 		title = title[:57] + "..."
 	}
 	a.cfg.Session.Title = title
-	a.cfg.Store.UpdateSessionTitle(a.cfg.Session.ID, title)
+	if err := a.cfg.Store.UpdateSessionTitle(a.cfg.Session.ID, title); err != nil {
+		a.events <- EventError{Err: fmt.Errorf("updating session title: %w", err)}
+	}
 }
 
 // gitContext returns git branch and status info, or empty string if not in a git repo.
@@ -562,7 +564,9 @@ func buildAssistantContent(text string, toolCalls []toolCall) []interface{} {
 
 func extractDetail(toolName string, input json.RawMessage) string {
 	var m map[string]interface{}
-	json.Unmarshal(input, &m)
+	if err := json.Unmarshal(input, &m); err != nil {
+		return ""
+	}
 
 	switch toolName {
 	case "bash":

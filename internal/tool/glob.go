@@ -107,25 +107,21 @@ func (t *GlobTool) Execute(ctx context.Context, input json.RawMessage) (*Result,
 			return ctx.Err()
 		}
 
-		// Skip hidden directories
-		if info.IsDir() && strings.HasPrefix(info.Name(), ".") && path != root {
-			return filepath.SkipDir
-		}
-		// Skip node_modules
-		if info.IsDir() && info.Name() == "node_modules" {
-			return filepath.SkipDir
-		}
-
 		if info.IsDir() {
+			name := info.Name()
+			if strings.HasPrefix(name, ".") && path != root {
+				return filepath.SkipDir
+			}
+			switch name {
+			case "node_modules", "vendor", "build", "dist",
+				".next", "__pycache__", ".venv", "target":
+				return filepath.SkipDir
+			}
 			return nil
 		}
 
 		rel, _ := filepath.Rel(root, path)
 		matched := matchGlob(args.Pattern, rel)
-		if !matched {
-			// Also try matching just the filename for simple patterns
-			matched, _ = filepath.Match(args.Pattern, info.Name())
-		}
 
 		if matched {
 			matches = append(matches, fileEntry{path: path, modTime: info.ModTime().Unix()})

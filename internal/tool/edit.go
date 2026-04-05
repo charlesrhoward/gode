@@ -70,14 +70,29 @@ func (t *EditTool) Execute(ctx context.Context, input json.RawMessage) (*Result,
 		return &Result{Output: fmt.Sprintf("old_string found %d times — must be unique. Provide more context.", count), IsError: true}, nil
 	}
 
+	matchIdx := strings.Index(fileContent, args.OldString)
+	lineNum := strings.Count(fileContent[:matchIdx], "\n") + 1
 	newContent := strings.Replace(fileContent, args.OldString, args.NewString, 1)
 
-	if err := os.WriteFile(args.FilePath, []byte(newContent), 0644); err != nil {
+	// Preserve original file permissions
+	info, _ := os.Stat(args.FilePath)
+	perm := info.Mode().Perm()
+	if err := os.WriteFile(args.FilePath, []byte(newContent), perm); err != nil {
 		return &Result{Output: fmt.Sprintf("cannot write file: %v", err), IsError: true}, nil
 	}
 
-	// Find the line number where the edit occurred
-	lineNum := strings.Count(fileContent[:strings.Index(fileContent, args.OldString)], "\n") + 1
+	// Build a concise diff showing what changed
+	oldLines := strings.Split(args.OldString, "\n")
+	newLines := strings.Split(args.NewString, "\n")
 
-	return &Result{Output: fmt.Sprintf("edited %s at line %d", args.FilePath, lineNum)}, nil
+	var diff strings.Builder
+	diff.WriteString(fmt.Sprintf("edited %s at line %d\n", args.FilePath, lineNum))
+	for _, l := range oldLines {
+		diff.WriteString(fmt.Sprintf("- %s\n", l))
+	}
+	for _, l := range newLines {
+		diff.WriteString(fmt.Sprintf("+ %s\n", l))
+	}
+
+	return &Result{Output: diff.String()}, nil
 }

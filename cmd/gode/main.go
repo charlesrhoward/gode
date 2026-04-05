@@ -26,6 +26,9 @@ func main() {
 	providerFlag := flag.String("provider", "", "provider to use (overrides config)")
 	modelFlag := flag.String("model", "", "model to use (overrides config)")
 	promptFlag := flag.String("p", "", "run a single prompt headless (no TUI)")
+	autoApproveHeadless := false
+	flag.BoolVar(&autoApproveHeadless, "y", false, "auto-approve tool execution in headless mode")
+	flag.BoolVar(&autoApproveHeadless, "yes", false, "auto-approve tool execution in headless mode")
 	flag.Parse()
 
 	if *showVersion {
@@ -39,13 +42,13 @@ func main() {
 		prompt = strings.Join(flag.Args(), " ")
 	}
 
-	if err := run(*providerFlag, *modelFlag, prompt); err != nil {
+	if err := run(*providerFlag, *modelFlag, prompt, autoApproveHeadless); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(providerOverride, modelOverride, prompt string) error {
+func run(providerOverride, modelOverride, prompt string, autoApproveHeadless bool) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
@@ -120,7 +123,7 @@ func run(providerOverride, modelOverride, prompt string) error {
 
 	// Headless mode: single prompt, print output, exit
 	if prompt != "" {
-		return runHeadless(ctx, ag, perms, prompt, runtimeInfo)
+		return runHeadless(ctx, ag, perms, prompt, runtimeInfo, autoApproveHeadless)
 	}
 
 	// TUI mode
@@ -129,9 +132,10 @@ func run(providerOverride, modelOverride, prompt string) error {
 	return app.Run(ctx)
 }
 
-func runHeadless(ctx context.Context, ag *agent.Agent, perms *permission.Manager, prompt string, runtimeInfo []string) error {
-	// Auto-allow all tools in headless mode
-	perms.AcceptAll()
+func runHeadless(ctx context.Context, ag *agent.Agent, perms *permission.Manager, prompt string, runtimeInfo []string, autoApproveTools bool) error {
+	if autoApproveTools {
+		perms.AcceptAll()
+	}
 
 	if len(runtimeInfo) > 0 {
 		fmt.Fprintln(os.Stderr, "startup check:")
@@ -140,33 +144,48 @@ func runHeadless(ctx context.Context, ag *agent.Agent, perms *permission.Manager
 		}
 	}
 
-	// Consume events and print
+	var runErr error
+
+	// Consume events and print. The agent events channel stays open across
+	// runs, so we use EventTurnDone/EventError as termination signals.
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		for evt := range ag.Events() {
 			switch e := evt.(type) {
 			case agent.EventText:
 				fmt.Print(e.Text)
 			case agent.EventToolStart:
-				fmt.Printf("\n── %s ──\n", e.Name)
+				if e.Detail != "" {
+					fmt.Fprintf(os.Stderr, "\n── %s: %s ──\n", e.Name, e.Detail)
+				} else {
+					fmt.Fprintf(os.Stderr, "\n── %s ──\n", e.Name)
+				}
 			case agent.EventToolEnd:
 				if e.Result != nil {
 					output := e.Result.Output
-					if len(output) > 2000 {
-						output = output[:2000] + "..."
+					if len(output) > 4000 {
+						output = output[:4000] + "\n... (truncated)"
 					}
 					fmt.Printf("%s\n", output)
 				}
-				fmt.Println("────────")
+				fmt.Fprintln(os.Stderr, "────────")
 			case agent.EventTurnDone:
-				fmt.Printf("\n\n[tokens: %d in, %d out]\n", e.Usage.InputTokens, e.Usage.OutputTokens)
+				fmt.Fprintf(os.Stderr, "\n[tokens: %d in, %d out, %s]\n",
+					e.Usage.InputTokens, e.Usage.OutputTokens,
+					e.Duration.Round(100*time.Millisecond))
+				return
 			case agent.EventError:
 				fmt.Fprintf(os.Stderr, "error: %v\n", e.Err)
+				runErr = fmt.Errorf("%v", e.Err)
+				return
 			}
 		}
 	}()
 
 	ag.Run(ctx, prompt)
-	return nil
+	<-done
+	return runErr
 }
 
 func providerRuntimeInfo(prov provider.Provider) []string {

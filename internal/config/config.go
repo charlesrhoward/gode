@@ -40,10 +40,14 @@ func Load() (*Config, error) {
 	}
 
 	// 1. Global config
-	loadFile(GlobalConfigPath(), cfg)
+	if err := loadFile(GlobalConfigPath(), cfg); err != nil {
+		return nil, fmt.Errorf("loading global config: %w", err)
+	}
 
 	// 2. Project config
-	loadFile(ProjectConfigPath(), cfg)
+	if err := loadFile(ProjectConfigPath(), cfg); err != nil {
+		return nil, fmt.Errorf("loading project config: %w", err)
+	}
 
 	// 3. Environment overrides
 	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
@@ -97,15 +101,18 @@ func (c *Config) Validate() error {
 	}
 }
 
-func loadFile(path string, cfg *Config) {
+func loadFile(path string, cfg *Config) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
 	}
 
 	var overlay Config
 	if err := json.Unmarshal(data, &overlay); err != nil {
-		return
+		return fmt.Errorf("parsing %s: %w", path, err)
 	}
 
 	if overlay.Model != "" {
@@ -121,9 +128,23 @@ func loadFile(path string, cfg *Config) {
 		cfg.MaxTokens = overlay.MaxTokens
 	}
 	for k, v := range overlay.Providers {
-		cfg.Providers[k] = v
+		cfg.Providers[k] = mergeProviderConfig(cfg.Providers[k], v)
 	}
 	if len(overlay.Permissions) > 0 {
 		cfg.Permissions = overlay.Permissions
 	}
+	return nil
+}
+
+func mergeProviderConfig(base, overlay ProviderConfig) ProviderConfig {
+	if overlay.APIKey != "" {
+		base.APIKey = overlay.APIKey
+	}
+	if overlay.BaseURL != "" {
+		base.BaseURL = overlay.BaseURL
+	}
+	if overlay.Python != "" {
+		base.Python = overlay.Python
+	}
+	return base
 }

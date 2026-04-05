@@ -322,9 +322,16 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+	case tea.KeyCtrlJ:
+		if m.state == stateReady {
+			m.input.InsertString("\n")
+			m.resizeInput()
+			return m, nil
+		}
+
 	case tea.KeyEnter:
 		if m.state == stateReady {
-			// Alt+Enter or Ctrl+J: insert newline
+			// Alt+Enter: insert newline
 			if msg.Alt {
 				m.input.InsertString("\n")
 				m.resizeInput()
@@ -355,6 +362,16 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, m.spinner.Tick
 			case "n":
 				m.permDialog.result <- permission.Deny
+				m.permDialog = nil
+				m.state = stateStreaming
+				m.recalcViewport()
+				m.viewport.SetContent(m.renderMessages())
+				return m, m.spinner.Tick
+			case "s":
+				if m.perms != nil {
+					m.perms.AcceptSession(m.permDialog.tool, "")
+				}
+				m.permDialog.result <- permission.Allow
 				m.permDialog = nil
 				m.state = stateStreaming
 				m.recalcViewport()
@@ -726,7 +743,7 @@ func (m *model) handleAgentEvent(evt agent.Event) (tea.Model, tea.Cmd) {
 			} else {
 				tv.status = "done"
 			}
-			tv.output = truncate(e.Result.Output, 500)
+			tv.output = truncateLines(e.Result.Output, 80)
 		}
 		m.viewport.SetContent(m.renderMessages())
 		m.viewport.GotoBottom()
@@ -783,7 +800,7 @@ func (m *model) handleAgentEvent(evt agent.Event) (tea.Model, tea.Cmd) {
 					mv.tools = append(mv.tools, &toolView{
 						name:   ht.Name,
 						status: "done",
-						output: truncate(ht.Output, 200),
+						output: truncateLines(ht.Output, 40),
 					})
 				}
 				m.messages = append(m.messages, mv)
@@ -892,7 +909,7 @@ func (m *model) renderPermissionDialog() string {
 
 	content := fmt.Sprintf("%s\nTool: %s\nDetail: %s\n\n%s",
 		label, tool, detail,
-		mutedStyle.Render("[y]es  [n]o  [a]llow all"))
+		mutedStyle.Render("[y]es  [n]o  [s]ession allow tool  [a]llow all"))
 
 	w := m.width - 4
 	if w < 40 {
@@ -1025,11 +1042,7 @@ func (m *model) renderToolCard(tv *toolView) string {
 	}
 	content := header
 	if tv.output != "" {
-		output := tv.output
-		if len(output) > 300 {
-			output = output[:300] + "..."
-		}
-		content += "\n" + mutedStyle.Render(output)
+		content += "\n" + mutedStyle.Render(tv.output)
 	}
 
 	w := m.width - 6
@@ -1044,6 +1057,16 @@ func truncate(s string, max int) string {
 		return s[:max] + "..."
 	}
 	return s
+}
+
+// truncateLines keeps the first N lines, showing how many were cut.
+func truncateLines(s string, maxLines int) string {
+	lines := strings.Split(s, "\n")
+	if len(lines) <= maxLines {
+		return s
+	}
+	kept := strings.Join(lines[:maxLines], "\n")
+	return kept + fmt.Sprintf("\n... (%d more lines)", len(lines)-maxLines)
 }
 
 func (m *model) startCompaction() (tea.Model, tea.Cmd) {

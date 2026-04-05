@@ -113,8 +113,9 @@ func (s *SQLiteStore) GetSession(id string) (*SessionRow, error) {
 	if err := row.Scan(&sess.ID, &sess.Title, &sess.Memory, &sess.Directory, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
-	sess.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
-	sess.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+	if err := parseSessionTimes(sess, createdAt, updatedAt); err != nil {
+		return nil, err
+	}
 	return sess, nil
 }
 
@@ -159,11 +160,15 @@ func (s *SQLiteStore) ListSessions() ([]*SessionRow, error) {
 		sess := &SessionRow{}
 		var createdAt, updatedAt string
 		if err := rows.Scan(&sess.ID, &sess.Title, &sess.Memory, &sess.Directory, &createdAt, &updatedAt); err != nil {
-			continue
+			return nil, err
 		}
-		sess.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
-		sess.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+		if err := parseSessionTimes(sess, createdAt, updatedAt); err != nil {
+			return nil, err
+		}
 		sessions = append(sessions, sess)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return sessions, nil
 }
@@ -178,8 +183,9 @@ func (s *SQLiteStore) FindSessionByDir(dir string) (*SessionRow, error) {
 	if err := row.Scan(&sess.ID, &sess.Title, &sess.Memory, &sess.Directory, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
-	sess.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
-	sess.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+	if err := parseSessionTimes(sess, createdAt, updatedAt); err != nil {
+		return nil, err
+	}
 	return sess, nil
 }
 
@@ -202,7 +208,9 @@ func (s *SQLiteStore) AddMessage(msg *MessageRow) error {
 		msg.ID, msg.SessionID, msg.Role, string(msg.Content), msg.UsageInput, msg.UsageOutput, now,
 	)
 	if err == nil {
-		s.db.Exec("UPDATE sessions SET updated_at = ? WHERE id = ?", now, msg.SessionID)
+		if _, updateErr := s.db.Exec("UPDATE sessions SET updated_at = ? WHERE id = ?", now, msg.SessionID); updateErr != nil {
+			return updateErr
+		}
 	}
 	return err
 }
@@ -223,11 +231,18 @@ func (s *SQLiteStore) GetMessages(sessionID string) ([]*MessageRow, error) {
 		var content string
 		var createdAt string
 		if err := rows.Scan(&msg.ID, &msg.SessionID, &msg.Role, &content, &msg.UsageInput, &msg.UsageOutput, &createdAt); err != nil {
-			continue
+			return nil, err
 		}
 		msg.Content = json.RawMessage(content)
-		msg.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		parsedAt, err := time.Parse(time.RFC3339, createdAt)
+		if err != nil {
+			return nil, fmt.Errorf("parsing message %s timestamp: %w", msg.ID, err)
+		}
+		msg.CreatedAt = parsedAt
 		messages = append(messages, msg)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return messages, nil
 }
@@ -259,4 +274,18 @@ func (s *SQLiteStore) ReplaceMessages(sessionID string, messages []MessageRow) e
 	}
 
 	return tx.Commit()
+}
+
+func parseSessionTimes(sess *SessionRow, createdAt, updatedAt string) error {
+	created, err := time.Parse(time.RFC3339, createdAt)
+	if err != nil {
+		return fmt.Errorf("parsing session %s created_at: %w", sess.ID, err)
+	}
+	updated, err := time.Parse(time.RFC3339, updatedAt)
+	if err != nil {
+		return fmt.Errorf("parsing session %s updated_at: %w", sess.ID, err)
+	}
+	sess.CreatedAt = created
+	sess.UpdatedAt = updated
+	return nil
 }

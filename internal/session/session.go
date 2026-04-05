@@ -3,6 +3,7 @@ package session
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -34,7 +35,7 @@ func GetOrCreate(store *storage.SQLiteStore, dir string) (*Session, error) {
 	}
 
 	if err != sql.ErrNoRows {
-		// Unexpected error, but still create a new session
+		return nil, fmt.Errorf("finding session for %s: %w", dir, err)
 	}
 
 	// Create new session
@@ -116,7 +117,7 @@ func LoadMessages(store *storage.SQLiteStore, sessionID string) ([]provider.Mess
 	for _, row := range rows {
 		var content []interface{}
 		if err := json.Unmarshal(row.Content, &content); err != nil {
-			continue
+			return nil, fmt.Errorf("decoding stored message %s: %w", row.ID, err)
 		}
 		messages = append(messages, provider.Message{
 			Role:    row.Role,
