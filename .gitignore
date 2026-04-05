@@ -1,0 +1,6 @@
+bin/
+/gode
+*.db
+*.sqlite
+.gode/
+.env
